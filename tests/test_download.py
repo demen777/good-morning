@@ -9,8 +9,8 @@ from good_morning import good_morning as gm
 
 class TestDownloadReturns(TestCase):
     def test_downloadreturn(self):
-        kr = gm.KeyRatiosDownloader()
-        frames = kr.download('aapl')
+        kr = gm.FinancialsDownloader()
+        frames = kr.download('T', months=3)
         test = len(frames)
         exp = 11
         self.assertEqual(test, exp, "Download is working")

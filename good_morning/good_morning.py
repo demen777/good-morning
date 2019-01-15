@@ -277,7 +277,7 @@ class FinancialsDownloader(object):
         """
         self._table_prefix = table_prefix
 
-    def download(self, ticker, conn = None):
+    def download(self, ticker, conn = None, months=12):
         u"""Downloads and returns a dictionary containing pandas.DataFrames
         representing the financials (i.e. income statement, balance sheet,
         cash flow) for the given Morningstar ticker. If the MySQL connection
@@ -304,7 +304,7 @@ class FinancialsDownloader(object):
                 (u'is', u'income_statement'),
                 (u'bs', u'balance_sheet'),
                 (u'cf', u'cash_flow')]:
-            frame = self._download(ticker, report_type)
+            frame = self._download(ticker, report_type, months)
             result[table_name] = frame
             if conn:
                 self._upload_frame(
@@ -316,7 +316,7 @@ class FinancialsDownloader(object):
         result[u'currency'] = self._currency
         return result
 
-    def _download(self, ticker, report_type):
+    def _download(self, ticker, report_type, months=12):
         u"""Downloads and returns a pandas.DataFrame corresponding to the
         given Morningstar ticker and the given type of the report.
 
@@ -328,7 +328,7 @@ class FinancialsDownloader(object):
         url = (r'http://financials.morningstar.com/ajax/' +
                r'ReportProcess4HtmlAjax.html?&t=' + ticker +
                r'&region=usa&culture=en-US&cur=USD' +
-               r'&reportType=' + report_type + r'&period=12' +
+               r'&reportType=' + report_type + r'&period=' + str(months) +
                r'&dataType=A&order=asc&columnYear=5&rounding=3&view=raw')
         with urllib.request.urlopen(url) as response:
             json_text = response.read().decode(u'utf-8')
@@ -345,9 +345,9 @@ class FinancialsDownloader(object):
 
             json_data = json.loads(json_text)
             result_soup = BeautifulSoup(json_data[u'result'],u'html.parser')
-            return self._parse(result_soup)
+            return self._parse(result_soup, months)
 
-    def _parse(self, soup):
+    def _parse(self, soup, months=12):
         u"""Extracts and returns a pandas.DataFrame corresponding to the
         given parsed HTML response from financials.morningstar.com.
 
@@ -362,10 +362,11 @@ class FinancialsDownloader(object):
         year = main.find(u'div', {u'id': u'Year'})
         self._year_ids = [node.attrs[u'id'] for node in year]
         period_month = pd.datetime.strptime(year.div.text, u'%Y-%m').month
+        freq = 'Q' if months == 3 else pd.tseries.offsets.YearEnd(month=period_month)
         self._period_range = pd.period_range(
             year.div.text, periods=len(self._year_ids),
             # freq=pd.datetools.YearEnd(month=period_month))
-            freq = pd.tseries.offsets.YearEnd(month=period_month))
+            freq=freq)
         unit = left.find(u'div', {u'id': u'unitsAndFiscalYear'})
         self._fiscal_year_end = int(unit.attrs[u'fyenumber'])
         self._currency = unit.attrs[u'currency']
@@ -374,9 +375,27 @@ class FinancialsDownloader(object):
         self._read_labels(left)
         self._data_index = 0
         self._read_data(main)
-        return pd.DataFrame(self._data,
+        df = pd.DataFrame(self._data,
                             columns=[u'parent_index', u'title'] + list(
                                 self._period_range))
+        part = ''
+        part_length = 0
+        for index, row in df.iterrows():
+            if row[u'title'] == 'Free Cash Flow':
+                part = row[u'title']
+                part_length = 3
+            elif row[u'title'] == 'Earnings per share':
+                part = row[u'title']
+                part_length = 2
+            elif row[u'title'] == 'Weighted average shares outstanding':
+                part = row[u'title']
+                part_length = 2
+            elif part_length > 0:
+                label_title = part + ' - ' + row[u'title']
+                part_length -= 1
+                df.at[index, u'title'] = label_title
+        df = df[~df[u'title'].isin(['Free Cash Flow', 'Earnings per share', 'Weighted average shares outstanding'])]
+        return df
 
     def _read_labels(self, root_node, parent_label_index = None):
         u"""Recursively reads labels from the parsed HTML response.
@@ -476,7 +495,7 @@ class FinancialsDownloader(object):
         :return MySQL CREATE TABLE statement.
         """
         year = date.today().year
-        year_range = xrange(year - 6, year + 2)
+        year_range = range(year - 6, year + 2)
         columns = u',\n'.join(
             [u'  `year_%d` DECIMAL(20,5) DEFAULT NULL ' % year +
              u'COMMENT "Year %d"' % year
